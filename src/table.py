@@ -1295,11 +1295,12 @@ class TableHeader:
 
 
 class Table:
-    def __init__(self, page, cells):
+    from typing import Optional
+    def __init__(self, page, cells,exclusion_zone:Optional[Sequence]=None):
         self.page = page
         self.cells = cells
         self.header = self._get_header()  # PyMuPDF extension
-
+        self.exclusion_zone=[fitz.Rect(i) for i in exclusion_zone] if exclusion_zone else None
     @property
     def bbox(self):
         c = self.cells
@@ -1312,6 +1313,9 @@ class Table:
 
     @property
     def rows(self) -> list:
+        if getattr(self,'exclusion_zone',None):
+            self.cells=[cell for cell in self.cells if not any([(rect.intersect(cell) or rect.contains(cell)) for rect in self.exclusion_zone])]
+            
         _sorted = sorted(self.cells, key=itemgetter(1, 0))
         xs = list(sorted(set(map(itemgetter(0), self.cells))))
         rows = []
@@ -1329,10 +1333,9 @@ class Table:
     def col_count(self) -> int:  # PyMuPDF extension
         return max([len(r.cells) for r in self.rows])
 
-    def extract(self, **kwargs) -> list:
+    def extract(self, markdown=False, **kwargs) -> list:
         chars = CHARS
         table_arr = []
-
         def char_in_bbox(char, bbox) -> bool:
             v_mid = (char["top"] + char["bottom"]) / 2
             h_mid = (char["x0"] + char["x1"]) / 2
@@ -1347,7 +1350,11 @@ class Table:
 
             for cell in row.cells:
                 if cell is None:
-                    cell_text = None
+                    if not markdown:
+                        cell_text = None
+                    else:
+                        continue
+                    
                 else:
                     cell_chars = [
                         char for char in row_chars if char_in_bbox(char, cell)
@@ -1371,25 +1378,25 @@ class Table:
         """Output table content as a string in Github-markdown format.
 
         If clean is true, markdown syntax is removed from cell content."""
-        output = "|"
-
+        output = f"[TAB]\n##{';'.join([str(i) for i in self.bbox])}##\n|"
+        
         # generate header string and MD underline
         for i, name in enumerate(self.header.names):
             if name is None or name == "":  # generate a name if empty
-                name = f"Col{i+1}"
+                continue
             name = name.replace("\n", " ")  # remove any line breaks
             if clean:  # remove sensitive syntax
                 name = html.escape(name.replace("-", "&#45;"))
             output += name + "|"
 
         output += "\n"
-        output += "|" + "|".join("---" for i in range(self.col_count)) + "|\n"
+        # output += "|" + "|".join("---" for i in range(self.col_count)) + "|\n"
 
         # skip first row in details if header is part of the table
         j = 0 if self.header.external else 1
 
         # iterate over detail rows
-        for row in self.extract()[j:]:
+        for row in self.extract(markdown=True)[j:]:
             line = "|"
             for i, cell in enumerate(row):
                 # output None cells with empty string
@@ -1399,7 +1406,7 @@ class Table:
                 line += cell + "|"
             line += "\n"
             output += line
-        return output + "\n"
+        return output + "\n[TAB]\n"
 
     def to_pandas(self, **kwargs):
         """Return a pandas DataFrame version of the table."""
@@ -1437,7 +1444,7 @@ class Table:
 
         return pd.DataFrame(pd_dict)
 
-    def _get_header(self, y_tolerance=3):
+    def _get_header(self, y_tolerance=5):
         """Identify the table header.
 
         *** PyMuPDF extension. ***
@@ -1946,7 +1953,6 @@ def make_edges(page, clip=None, tset=None, add_lines=None):
     global EDGES
     snap_x = tset.snap_x_tolerance
     snap_y = tset.snap_y_tolerance
-    min_length = tset.edge_min_length
     lines_strict = (
         tset.vertical_strategy == "lines_strict"
         or tset.horizontal_strategy == "lines_strict"
@@ -2118,14 +2124,13 @@ def make_edges(page, clip=None, tset=None, add_lines=None):
                 if line_dict:
                     EDGES.append(line_to_edge(line_dict))
 
-            elif i[0] == "re":
-                # A rectangle: decompose into 4 lines, but filter out
-                # the ones that simulate a line
-                rect = i[1].normalize()  # normalize the rectangle
+            elif i[0] == "re":  # a rectangle: decompose into 4 lines
+                rect = i[1].normalize()  # rectangle itself
+                # ignore minute rectangles
+                if rect.height <= snap_y and rect.width <= snap_x:
+                    continue
 
-                if (
-                    rect.width <= min_length and rect.width < rect.height
-                ):  # simulates a vertical line
+                if rect.width <= snap_x:  # simulates a vertical line
                     x = abs(rect.x1 + rect.x0) / 2  # take middle value for x
                     p1 = Point(x, rect.y0)
                     p2 = Point(x, rect.y1)
@@ -2134,9 +2139,7 @@ def make_edges(page, clip=None, tset=None, add_lines=None):
                         EDGES.append(line_to_edge(line_dict))
                     continue
 
-                if (
-                    rect.height <= min_length and rect.height < rect.width
-                ):  # simulates a horizontal line
+                if rect.height <= snap_y:  # simulates a horizontal line
                     y = abs(rect.y1 + rect.y0) / 2  # take middle value for y
                     p1 = Point(rect.x0, y)
                     p2 = Point(rect.x1, y)
@@ -2285,11 +2288,11 @@ def find_tables(
     min_words_vertical: float = DEFAULT_MIN_WORDS_VERTICAL,
     min_words_horizontal: float = DEFAULT_MIN_WORDS_HORIZONTAL,
     intersection_tolerance: float = 3,
-    intersection_x_tolerance: float = None,
+    intersection_x_tolerance: float = 200,
     intersection_y_tolerance: float = None,
     text_tolerance=3,
-    text_x_tolerance=3,
-    text_y_tolerance=3,
+    text_x_tolerance=30,
+    text_y_tolerance=30,
     strategy=None,  # offer abbreviation
     add_lines=None,  # optional user-specified lines
 ):
